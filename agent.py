@@ -1104,7 +1104,7 @@ class TradingAgent:
         logger.info("="*60)
         
         # Run self-reflection for learning
-        if self.memory and len(self.trade_history) >= 10:
+        if self.memory and len(self.trade_history) >= 3:
             logger.info("\nRunning self-reflection...")
             reflection = self.memory.reflect()
             
