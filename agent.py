@@ -268,14 +268,15 @@ class TradingAgent:
     def __init__(
         self,
         ssid: str = None,
-        cookies_file: str = None,  # Path to cookies.json for auto-refresh
+        cookies_file: str = None,
         is_demo: bool = True,
         trade_amount: float = 1.0,
         trade_duration: int = 60,
         assets: list = None,
         max_trades_per_session: int = 10,
         min_confidence: float = 0.6,
-        prediction_freshness: int = 30,  # Max age of cached prediction in seconds
+        prediction_freshness: int = 30,
+        run_duration_minutes: float = None,  # How long to run (None = run until max_trades)
     ):
         self.ssid = normalize_ssid(ssid) if ssid else None
         self.cookies_file = cookies_file
@@ -286,6 +287,7 @@ class TradingAgent:
         self.max_trades = max_trades_per_session
         self.min_confidence = min_confidence
         self.prediction_freshness = prediction_freshness
+        self.run_duration_minutes = run_duration_minutes
 
         self.client = None
         self.ai_engine: Optional[AIEngine] = None
@@ -759,7 +761,17 @@ class TradingAgent:
     async def run_parallel(self, trade_interval: int = 30):
         """
         Run the trading agent with PARALLEL prediction and execution.
-        Auto-refreshes SSID when it expires using cookies.
+        
+        How it works:
+        1. Background task continuously runs AI predictions, caching results
+        2. Main loop checks for fresh cached predictions and executes trades
+        3. Execution is instant (< 1 second) since AI already finished thinking
+        
+        Timeline:
+        T=0s:   Background AI starts analyzing EURUSD
+        T=60s:  Background AI finishes, caches "CALL EURUSD, 80%"
+        T=65s:  Main loop sees fresh cache, executes trade instantly
+        T=120s: Background AI finishes fresh analysis, updates cache
         """
         logger.info("="*60)
         logger.info("POCKET OPTIONS AI TRADING AGENT (PARALLEL MODE)")
@@ -770,7 +782,10 @@ class TradingAgent:
         logger.info(f"Prediction freshness: {self.prediction_freshness}s")
         logger.info(f"Min confidence: {self.min_confidence:.0%}")
         logger.info(f"Max trades per session: {self.max_trades}")
-        logger.info(f"Auto-refresh: {'ENABLED' if self.cookies_file else 'DISABLED'}")
+        if self.run_duration_minutes:
+            logger.info(f"Run duration: {self.run_duration_minutes} minutes")
+        else:
+            logger.info("Run duration: Until max trades reached")
         logger.info("="*60)
 
         # Connect to Pocket Option
@@ -798,6 +813,7 @@ class TradingAgent:
                 return
 
         self.running = True
+        self.start_time = datetime.now()
         
         # Start background prediction loop
         self.prediction_task = asyncio.create_task(self._background_prediction_loop())
@@ -808,7 +824,21 @@ class TradingAgent:
         await asyncio.sleep(10)
 
         try:
-            while self.running and self.trades_made < self.max_trades:
+            while self.running:
+                # Check if run duration exceeded
+                if self.run_duration_minutes:
+                    elapsed = (datetime.now() - self.start_time).total_seconds() / 60
+                    if elapsed >= self.run_duration_minutes:
+                        logger.info(f"\nRun duration ({self.run_duration_minutes} min) reached. Stopping.")
+                        self.running = False
+                        break
+                
+                # Check if max trades reached
+                if self.trades_made >= self.max_trades:
+                    logger.info(f"\nMax trades ({self.max_trades}) reached. Stopping.")
+                    self.running = False
+                    break
+
                 try:
                     # Cycle through assets
                     for asset in self.assets:
@@ -1032,6 +1062,7 @@ async def main():
     max_trades = int(os.environ.get("POCKET_OPTION_MAX_TRADES", "10"))
     min_confidence = float(os.environ.get("POCKET_OPTION_MIN_CONFIDENCE", "0.6"))
     prediction_freshness = int(os.environ.get("POCKET_OPTION_PREDICTION_FRESHNESS", "90"))
+    run_duration_minutes = float(os.environ.get("POCKET_OPTION_DURATION_MINUTES", "0")) or None  # e.g., 5, 10, 30, 60
     use_parallel = os.environ.get("POCKET_OPTION_PARALLEL", "true").lower() == "true"
 
     assets_str = os.environ.get("POCKET_OPTION_ASSETS", "EURUSD_otc,GBPUSD_otc,USDJPY_otc")
@@ -1048,6 +1079,7 @@ async def main():
         max_trades_per_session=max_trades,
         min_confidence=min_confidence,
         prediction_freshness=prediction_freshness,
+        run_duration_minutes=run_duration_minutes,
     )
 
     try:
