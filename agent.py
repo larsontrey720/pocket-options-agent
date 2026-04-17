@@ -66,7 +66,7 @@ def normalize_ssid(ssid: str) -> str:
         
         # Reconstruct SSID
         normalized = f'42["auth",{json.dumps(data)}]'
-        logger.info(f"Normalized SSID: {normalized[:80]}...")
+        logger.info(f"Normalized SSID: {normalized[:80]}...')
         return normalized
         
     except json.JSONDecodeError:
@@ -340,61 +340,58 @@ class TradingAgent:
                 
                 page = await context.new_page()
                 
-                # Capture WebSocket frames
-                def on_web_socket(ws):
-                    logger.info(f"WebSocket opened: {ws.url}")
-                    
-                    async def on_frames(frame):
-                        nonlocal captured_ssid
-                        payload = frame.payload
+                # Use CDP to capture WebSocket frames
+                cdp = await context.new_cdp_session(page)
+                await cdp.send('Network.enable')
+                
+                async def on_ws_frame(event):
+                    nonlocal captured_ssid
+                    try:
+                        # Check both sent and received frames
+                        payload = event.get('requestPayload', '') or event.get('responsePayload', '')
+                        if isinstance(payload, dict):
+                            return
                         if isinstance(payload, bytes):
                             payload = payload.decode('utf-8', errors='ignore')
                         
                         # Look for auth message
-                        if '42["auth"' in payload or '"session"' in payload:
-                            # Extract the full auth message
-                            if payload.startswith('42["auth"'):
-                                captured_ssid = payload.strip()
-                                logger.info(f"CAPTURED SSID: {captured_ssid[:80]}...")
-                    
-                    ws.on('framesreceived', on_frames)
+                        if '42["auth"' in str(payload) or ('"session"' in str(payload) and '"uid"' in str(payload)):
+                            # Extract the auth message
+                            import re
+                            match = re.search(r'42\["auth",\s*\{[^}]+\}\s*\]', str(payload))
+                            if match:
+                                captured_ssid = match.group(0)
+                                logger.info(f"CAPTURED SSID via CDP: {captured_ssid[:80]}...")
+                    except Exception as e:
+                        logger.debug(f"Frame parse error: {e}")
                 
-                page.on('websocket', on_web_socket)
+                cdp.on('Network.webSocketFrameSent', on_ws_frame)
+                cdp.on('Network.webSocketFrameReceived', on_ws_frame)
                 
                 # Navigate to Pocket Option
                 logger.info("Navigating to Pocket Option...")
-                await page.goto("https://pocketoption.com/en/cabinet/demo-quick-high-low", wait_until='networkidle', timeout=30000)
+                
+                # Use page.goto with wait_until
+                response = await page.goto(
+                    "https://pocketoption.com/en/cabinet/demo-quick-high-low",
+                    wait_until='domcontentloaded',
+                    timeout=30000
+                )
                 
                 # Wait for WebSocket to connect and send auth
-                await asyncio.sleep(5)
-                
-                # Also try to capture from CDP
-                cdp = await context.new_cdp_session(page)
-                await cdp.send('Network.enable')
-                
-                async def on_websocket_frame(event):
-                    nonlocal captured_ssid
-                    if 'responsePayload' in event:
-                        payload = event.get('responsePayload', '')
-                    elif 'requestPayload' in event:
-                        payload = event.get('requestPayload', '')
-                    else:
-                        return
-                    
-                    if isinstance(payload, str) and '42["auth"' in payload:
-                        captured_ssid = payload.strip()
-                        logger.info(f"CDP CAPTURED: {captured_ssid[:80]}...")
-                
-                cdp.on('Network.webSocketFrameReceived', on_websocket_frame)
-                cdp.on('Network.webSocketFrameSent', on_websocket_frame)
-                
-                # Wait more for capture
-                await asyncio.sleep(3)
+                logger.info("Waiting for WebSocket auth...")
+                for i in range(10):
+                    await asyncio.sleep(2)
+                    if captured_ssid:
+                        break
+                    logger.debug(f"Waiting... attempt {i+1}/10")
                 
                 await browser.close()
                 
         except Exception as e:
             logger.error(f"SSID refresh failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             return None
         
         if captured_ssid:
