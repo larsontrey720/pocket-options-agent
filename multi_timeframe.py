@@ -76,7 +76,7 @@ def analyze_multi_timeframe(candles_1m: list, candles_5m: list = None, candles_1
         alignment = 0.3  # Low alignment - don't trade
     
     # Only allow trade if strong alignment (2+ timeframes agree)
-    trade_allowed = alignment >= 0.66 and direction != "neutral"
+    trade_allowed = alignment >= 0.50
     
     # Apply penalty if higher timeframes disagree
     if trend_15m != "unknown" and trend_15m != direction and direction != "neutral":
