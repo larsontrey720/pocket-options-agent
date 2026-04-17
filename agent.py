@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,6 +28,49 @@ logger = logging.getLogger("trading-agent")
 # NVIDIA AI Configuration
 NVIDIA_BASE_URL = "https://nvidia-key-rotation-proxy-ts.vercel.app/v1"
 NVIDIA_MODEL = "moonshotai/kimi-k2.5"
+
+
+def normalize_ssid(ssid: str) -> str:
+    """
+    Convert various SSID formats to the expected format.
+    
+    Handles:
+    - sessionToken -> session conversion
+    - Missing isDemo/platform fields
+    - Various field orderings
+    """
+    ssid = ssid.strip()
+    
+    # Extract the JSON part from 42["auth",{...}]
+    match = re.match(r'42\["auth",\s*(\{.*\})\s*\]', ssid)
+    if not match:
+        # Already in a different format, return as-is
+        return ssid
+    
+    try:
+        data = json.loads(match.group(1))
+        
+        # Convert sessionToken to session if needed
+        if "sessionToken" in data and "session" not in data:
+            data["session"] = data.pop("sessionToken")
+        
+        # Ensure required fields exist
+        if "isDemo" not in data:
+            data["isDemo"] = 1
+        if "platform" not in data:
+            data["platform"] = 1
+        
+        # Remove fields the library doesn't expect
+        for key in ["lang", "currentUrl", "isChart"]:
+            data.pop(key, None)
+        
+        # Reconstruct SSID
+        normalized = f'42["auth",{json.dumps(data)}]'
+        logger.info(f"Normalized SSID: {normalized[:80]}...")
+        return normalized
+        
+    except json.JSONDecodeError:
+        return ssid
 
 
 class TradeDirection(Enum):
@@ -213,7 +257,7 @@ class TradingAgent:
         max_trades_per_session: int = 10,
         min_confidence: float = 0.6,
     ):
-        self.ssid = ssid
+        self.ssid = normalize_ssid(ssid)  # Convert sessionToken -> session
         self.is_demo = is_demo
         self.trade_amount = trade_amount
         self.trade_duration = trade_duration
