@@ -1116,22 +1116,30 @@ async def main():
     cookies_file = os.environ.get("POCKET_OPTION_COOKIES", "/home/workspace/pocket-options-agent/cookies.json")
 
     if not ssid:
-        print("Pocket Options Trading Agent")
-        print("="*40)
-        print("\nYou can provide SSID manually OR use cookies for auto-refresh.")
-        print("\nHow to get your SSID:")
-        print("1. Open Pocket Option in your browser")
-        print("2. Open Developer Tools (F12)")
-        print("3. Go to Network tab, filter by WS (WebSocket)")
-        print("4. Find message starting with 42[\"auth\"")
-        print("5. Copy the ENTIRE message including 42[\"auth\",{...}]")
-        print("\nOr set POCKET_OPTION_COOKIES to path of your exported cookies.json")
-        print("\n")
+        # Check if cookies file exists - if so, skip prompt
+        if os.path.exists(cookies_file):
+            print(f"Using cookies from: {cookies_file}")
+        elif sys.stdin.isatty():
+            # Interactive mode - prompt user
+            print("Pocket Options Trading Agent")
+            print("="*40)
+            print("\nYou can provide SSID manually OR use cookies for auto-refresh.")
+            print("\nHow to get your SSID:")
+            print("1. Open Pocket Option in your browser")
+            print("2. Open Developer Tools (F12)")
+            print("3. Go to Network tab, filter by WS (WebSocket)")
+            print("4. Find message starting with 42[\"auth\"")
+            print("5. Copy the ENTIRE message including 42[\"auth\",{...}]")
+            print("\nOr set POCKET_OPTION_COOKIES to path of your exported cookies.json")
+            print("\n")
 
-        ssid = input("Enter your SSID (or press Enter to use cookies): ").strip()
+            ssid = input("Enter your SSID (or press Enter to use cookies): ").strip()
 
-        if not ssid:
-            print(f"Will use cookies from: {cookies_file}")
+            if not ssid:
+                print(f"Will use cookies from: {cookies_file}")
+        else:
+            # Non-interactive mode - just print info
+            print(f"No SSID provided. Using cookies from: {cookies_file}")
 
     # Configuration
     is_demo = os.environ.get("POCKET_OPTION_DEMO", "true").lower() == "true"
