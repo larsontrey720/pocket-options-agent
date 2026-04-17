@@ -51,6 +51,7 @@ Set environment variables or pass directly:
 | `POCKET_OPTION_MAX_TRADES` | `10` | Maximum trades per session |
 | `POCKET_OPTION_MIN_CONFIDENCE` | `0.6` | Minimum AI confidence to trade |
 | `POCKET_OPTION_ASSETS` | `EURUSD_otc,GBPUSD_otc,USDJPY_otc` | Comma-separated asset list |
+| `POCKET_OPTION_DURATION_MINUTES` | `0` | How long to run in minutes (0 = run until max_trades) |
 
 ## Usage
 
@@ -101,6 +102,25 @@ POCKET_OPTION_MIN_CONFIDENCE=0.7 \
 POCKET_OPTION_ASSETS="EURUSD_otc,GBPUSD_otc" \
 python agent.py
 ```
+
+### Run for a specific duration
+
+```bash
+# Run for 30 minutes
+POCKET_OPTION_DURATION_MINUTES=30 python agent.py
+
+# Run for 1 hour with custom trades limit
+POCKET_OPTION_DURATION_MINUTES=60 POCKET_OPTION_MAX_TRADES=50 python agent.py
+
+# Quick 5-minute test
+POCKET_OPTION_DURATION_MINUTES=5 POCKET_OPTION_MAX_TRADES=999 python agent.py
+```
+
+The agent stops when **either**:
+- Duration is reached (if `POCKET_OPTION_DURATION_MINUTES` is set)
+- Max trades is reached (default: 10)
+
+Set `POCKET_OPTION_MAX_TRADES=999` to run purely on time.
 
 ## How It Works
 
