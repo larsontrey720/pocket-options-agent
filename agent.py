@@ -42,7 +42,7 @@ logger = logging.getLogger("trading-agent")
 
 # NVIDIA AI Configuration
 NVIDIA_BASE_URL = "https://nvidia-key-rotation-proxy-ts.vercel.app/v1"
-NVIDIA_MODEL = "nvidia/ising-calibration-1-35b-a3b"
+NVIDIA_MODEL = "moonshotai/kimi-k2.5"
 
 
 def normalize_ssid(ssid: str) -> str:
