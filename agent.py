@@ -191,32 +191,10 @@ class AIEngine:
                     await asyncio.sleep(2)
         return ""
 
-    async def analyze_market(self, context: MarketContext) -> TradeDecision:
+    async def analyze_market(self, context: MarketContext, learning_context: str = "") -> TradeDecision:
         """Analyze market data and generate trading decision"""
         
-        # Summarize recent trades for AI context
-        recent_trades_summary = ""
-        if context.recent_trades:
-            wins = sum(1 for t in context.recent_trades if t.get("status") == "win")
-            losses = sum(1 for t in context.recent_trades if t.get("status") == "lose")
-            total_profit = sum(t.get("profit", 0) for t in context.recent_trades)
-            win_rate = (wins / len(context.recent_trades) * 100) if context.recent_trades else 0
-            
-            # Last 10 trades detail
-            last_10 = context.recent_trades[-10:]
-            last_10_str = "\n".join([
-                f"  {t.get('direction','?').upper()} {t.get('asset','?')} -> {t.get('status','?')} (${t.get('profit',0):.2f})"
-                for t in last_10
-            ])
-            
-            recent_trades_summary = f"""
-RECENT PERFORMANCE ({len(context.recent_trades)} trades):
-Win rate: {win_rate:.1f}% ({wins}W/{losses}L)
-Total P&L: ${total_profit:.2f}
-Last 10 trades:
-{last_10_str}
-"""
-
+        # Use passed learning context
         user_message = f"""Analyze this forex market and respond with ONLY JSON (no markdown, no explanation):
 
 Asset: {context.asset}
@@ -225,7 +203,7 @@ Trend: {context.candles_summary.get('trend', 'unknown')}
 Momentum: {context.candles_summary.get('momentum', 'unknown')}
 Up moves: {context.candles_summary.get('up_moves', 0)}
 Down moves: {context.candles_summary.get('down_moves', 0)}
-{recent_trades_summary}
+{learning_context}
 Rules: CALL if bullish, PUT if bearish, HOLD if unclear. Confidence 0.0-1.0. Learn from past trades.
 
 Respond ONLY with: {{"direction":"call","confidence":0.8,"reasoning":"brief reason","amount":5,"duration":60}}"""
@@ -507,9 +485,9 @@ class TradingAgent:
                                     break
                             continue
                     
-                    # Run AI analysis
-                    logger.info(f"[BG] Analyzing {asset}...")
-                    decision = await ai_session.analyze_market(context)
+                    # Run AI analysis with learning context
+                    learning_ctx = self.memory.get_context_for_ai() if self.memory else ""
+                    decision = await ai_session.analyze_market(context, learning_ctx)
                     
                     # Cache the prediction with timestamp
                     async with self.prediction_lock:
@@ -800,9 +778,9 @@ class TradingAgent:
             logger.warning(f"Skipping {asset} - no market data")
             return
 
-        # Get AI decision
-        async with AIEngine() as ai:
-            decision = await ai.analyze_market(context)
+        # Get AI decision with learning context
+        learning_ctx = self.memory.get_context_for_ai() if self.memory else ""
+        decision = await self.ai_engine.analyze_market(context, learning_ctx)
 
         logger.info(
             f"AI Decision: {decision.direction.value.upper()} "
