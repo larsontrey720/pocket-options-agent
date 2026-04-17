@@ -496,9 +496,9 @@ class TradingAgent:
                     learning_ctx = self.memory.get_context_for_ai() if self.memory else ""
                     decision = await ai_session.analyze_market(context, learning_ctx)
                     
-                    # Cache the prediction with timestamp
+                    # Cache the prediction with timestamp AND context
                     async with self.prediction_lock:
-                        self.prediction_cache[asset] = (decision, datetime.now())
+                        self.prediction_cache[asset] = (decision, datetime.now(), context)
                     
                     logger.info(
                         f"[BG] Cached prediction for {asset}: "
@@ -527,7 +527,7 @@ class TradingAgent:
                 if asset not in self.prediction_cache:
                     return None
                 
-                decision, timestamp = self.prediction_cache[asset]
+                decision, timestamp, context = self.prediction_cache[asset]
                 age = (datetime.now() - timestamp).total_seconds()
                 
                 if age > max_age:
@@ -541,23 +541,23 @@ class TradingAgent:
         # For sync access, we return the coroutine
         return _get()
 
-    async def get_cached_prediction_async(self, asset: str, max_age_seconds: int = None) -> Optional[TradeDecision]:
-        """Async version of get_cached_prediction"""
+    async def get_cached_prediction_async(self, asset: str, max_age_seconds: int = None) -> tuple:
+        """Returns (decision, context) or (None, None) if no fresh prediction"""
         max_age = max_age_seconds or self.prediction_freshness
         
         async with self.prediction_lock:
             if asset not in self.prediction_cache:
-                return None
+                return None, None
             
-            decision, timestamp = self.prediction_cache[asset]
+            decision, timestamp, context = self.prediction_cache[asset]
             age = (datetime.now() - timestamp).total_seconds()
             
             if age > max_age:
                 logger.info(f"Cached prediction for {asset} is {age:.0f}s old (max {max_age}s)")
-                return None
+                return None, None
             
             logger.info(f"Using cached prediction for {asset} (age: {age:.0f}s)")
-            return decision
+            return decision, context
 
     def _summarize_candles(self, candles: list) -> dict:
         """Summarize candle data for AI analysis"""
@@ -702,8 +702,14 @@ class TradingAgent:
             logger.error(f"Error getting market context: {e}")
             return None
 
-    async def execute_trade(self, decision: TradeDecision, asset: str) -> Optional[TradeResult]:
+    async def execute_trade(self, decision: TradeDecision, asset: str, context: MarketContext = None) -> Optional[TradeResult]:
         """Execute a trade based on AI decision"""
+        
+        # Check MTF blocking if context provided
+        if context and context.candles_summary.get("mtf_blocked"):
+            logger.warning(f"MTF BLOCKED: {context.candles_summary.get('mtf_reason', 'Unknown reason')}")
+            return None
+        
         if decision.direction == TradeDirection.HOLD:
             logger.info(f"HOLD decision for {asset}: {decision.reasoning}")
             return None
@@ -826,7 +832,7 @@ class TradingAgent:
 
         # Execute trade if confidence threshold met
         if decision.direction != TradeDirection.HOLD and decision.confidence >= self.min_confidence:
-            trade = await self.execute_trade(decision, asset)
+            trade = await self.execute_trade(decision, asset, context)
             if trade:
                 await self.check_trade_result(trade)
                 self.trades_made += 1
@@ -943,7 +949,7 @@ class TradingAgent:
                                 continue
                         
                         # Get cached prediction (INSTANT - no waiting for AI)
-                        decision = await self.get_cached_prediction_async(asset)
+                        decision, ctx = await self.get_cached_prediction_async(asset)
                         
                         if decision is None:
                             logger.info(f"No fresh prediction for {asset}, waiting...")
@@ -958,7 +964,7 @@ class TradingAgent:
                         # Execute trade if confidence threshold met
                         if decision.direction != TradeDirection.HOLD and decision.confidence >= self.min_confidence:
                             try:
-                                trade = await self.execute_trade(decision, asset)
+                                trade = await self.execute_trade(decision, asset, ctx)
                                 if trade:
                                     # Start result checker in background (don't block)
                                     asyncio.create_task(self._track_trade_result(trade))
@@ -970,7 +976,7 @@ class TradingAgent:
                                     if self.cookies_file:
                                         if await self._handle_ssid_expiry():
                                             # Retry the trade
-                                            trade = await self.execute_trade(decision, asset)
+                                            trade = await self.execute_trade(decision, asset, ctx)
                                             if trade:
                                                 asyncio.create_task(self._track_trade_result(trade))
                                                 self.trades_made += 1
