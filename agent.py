@@ -799,6 +799,18 @@ class TradingAgent:
                     "timestamp": trade.timestamp,
                     "confidence": trade.confidence if hasattr(trade, 'confidence') else 0.5,
                 })
+            
+            # Run self-reflection every 3 trades for real-time learning
+            if self.memory and len(self.trade_history) % 3 == 0 and len(self.trade_history) >= 3:
+                logger.info("\n[REAL-TIME LEARNING] Running self-reflection...")
+                reflection = self.memory.reflect()
+                if "insights" in reflection:
+                    for insight in reflection["insights"][:2]:
+                        logger.info(f"  Learned: {insight}")
+                if "recommendations" in reflection and reflection["recommendations"]:
+                    rec = reflection["recommendations"][0]
+                    logger.info(f"  Action: {rec.get("type", "")} - {rec.get("reason", "")}")
+                    logger.info("  (Learning applied to next predictions)")
 
             return trade
 
