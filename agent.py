@@ -277,7 +277,8 @@ class TradingAgent:
         min_confidence: float = 0.6,
         prediction_freshness: int = 30,  # Max age of cached prediction in seconds
     ):
-        self.ssid = normalize_ssid(ssid)  # Convert sessionToken -> session
+        self.ssid = normalize_ssid(ssid) if ssid else None
+        self.cookies_file = cookies_file
         self.is_demo = is_demo
         self.trade_amount = trade_amount
         self.trade_duration = trade_duration
@@ -297,6 +298,141 @@ class TradingAgent:
         self.prediction_cache: dict = {}  # {asset: (decision, timestamp)}
         self.prediction_lock = asyncio.Lock()
         self.prediction_task: Optional[asyncio.Task] = None
+        
+        # Auto-refresh state
+        self.ssid_expired = False
+        self.refresh_attempts = 0
+        self.max_refresh_attempts = 3
+
+    async def _refresh_ssid_via_cookies(self) -> Optional[str]:
+        """Get fresh SSID using cookies via Playwright"""
+        if not self.cookies_file or not os.path.exists(self.cookies_file):
+            logger.error(f"Cookies file not found: {self.cookies_file}")
+            return None
+        
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.error("Playwright not installed. Run: pip install playwright && python -m playwright install chromium")
+            return None
+        
+        logger.info(f"Refreshing SSID via cookies from {self.cookies_file}...")
+        
+        captured_ssid = None
+        
+        try:
+            with open(self.cookies_file) as f:
+                cookies = json.load(f)
+            
+            # Fix sameSite values
+            for c in cookies:
+                if 'sameSite' in c and c['sameSite'] not in ('Strict', 'Lax', 'None'):
+                    c['sameSite'] = 'Lax'
+            
+            logger.info(f"Loaded {len(cookies)} cookies")
+            
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context()
+                
+                # Add cookies
+                await context.add_cookies(cookies)
+                
+                page = await context.new_page()
+                
+                # Capture WebSocket frames
+                def on_web_socket(ws):
+                    logger.info(f"WebSocket opened: {ws.url}")
+                    
+                    async def on_frames(frame):
+                        nonlocal captured_ssid
+                        payload = frame.payload
+                        if isinstance(payload, bytes):
+                            payload = payload.decode('utf-8', errors='ignore')
+                        
+                        # Look for auth message
+                        if '42["auth"' in payload or '"session"' in payload:
+                            # Extract the full auth message
+                            if payload.startswith('42["auth"'):
+                                captured_ssid = payload.strip()
+                                logger.info(f"CAPTURED SSID: {captured_ssid[:80]}...")
+                    
+                    ws.on('framesreceived', on_frames)
+                
+                page.on('websocket', on_web_socket)
+                
+                # Navigate to Pocket Option
+                logger.info("Navigating to Pocket Option...")
+                await page.goto("https://pocketoption.com/en/cabinet/demo-quick-high-low", wait_until='networkidle', timeout=30000)
+                
+                # Wait for WebSocket to connect and send auth
+                await asyncio.sleep(5)
+                
+                # Also try to capture from CDP
+                cdp = await context.new_cdp_session(page)
+                await cdp.send('Network.enable')
+                
+                async def on_websocket_frame(event):
+                    nonlocal captured_ssid
+                    if 'responsePayload' in event:
+                        payload = event.get('responsePayload', '')
+                    elif 'requestPayload' in event:
+                        payload = event.get('requestPayload', '')
+                    else:
+                        return
+                    
+                    if isinstance(payload, str) and '42["auth"' in payload:
+                        captured_ssid = payload.strip()
+                        logger.info(f"CDP CAPTURED: {captured_ssid[:80]}...")
+                
+                cdp.on('Network.webSocketFrameReceived', on_websocket_frame)
+                cdp.on('Network.webSocketFrameSent', on_websocket_frame)
+                
+                # Wait more for capture
+                await asyncio.sleep(3)
+                
+                await browser.close()
+                
+        except Exception as e:
+            logger.error(f"SSID refresh failed: {e}")
+            return None
+        
+        if captured_ssid:
+            self.ssid = normalize_ssid(captured_ssid)
+            self.ssid_expired = False
+            self.refresh_attempts = 0
+            logger.info(f"Successfully refreshed SSID")
+            return self.ssid
+        
+        logger.warning("No SSID captured from WebSocket")
+        return None
+
+    async def _handle_ssid_expiry(self):
+        """Handle SSID expiry by attempting to refresh via cookies"""
+        self.refresh_attempts += 1
+        
+        if self.refresh_attempts > self.max_refresh_attempts:
+            logger.error(f"Max refresh attempts ({self.max_refresh_attempts}) reached. Stopping.")
+            self.running = False
+            return False
+        
+        logger.info(f"SSID expired. Refresh attempt {self.refresh_attempts}/{self.max_refresh_attempts}...")
+        
+        new_ssid = await self._refresh_ssid_via_cookies()
+        if new_ssid:
+            # Disconnect old client
+            if self.client:
+                try:
+                    await self.client.disconnect()
+                except:
+                    pass
+            
+            # Reconnect with new SSID
+            logger.info("Reconnecting with fresh SSID...")
+            connected = await self.connect()
+            return connected
+        
+        return False
 
     async def _background_prediction_loop(self):
         """
@@ -429,10 +565,13 @@ class TradingAgent:
         }
 
     async def connect(self):
-        """Connect to Pocket Option"""
+        """Connect to Pocket Option with auto-refresh on expiry"""
         try:
-            # Import the async client
             from pocketoptionapi_async import AsyncPocketOptionClient
+
+            if not self.ssid:
+                logger.error("No SSID available. Cannot connect.")
+                return False
 
             self.client = AsyncPocketOptionClient(
                 ssid=self.ssid,
@@ -446,9 +585,19 @@ class TradingAgent:
                 return True
             else:
                 logger.error("Failed to connect to Pocket Option")
+                # Try to refresh SSID if we have cookies
+                if self.cookies_file:
+                    new_ssid = await self._refresh_ssid_via_cookies()
+                    if new_ssid:
+                        return await self.connect()
                 return False
         except Exception as e:
             logger.error(f"Connection error: {e}")
+            # Check if it's an auth expiry
+            if 'auth' in str(e).lower() or 'session' in str(e).lower():
+                self.ssid_expired = True
+                if self.cookies_file:
+                    return await self._handle_ssid_expiry()
             return False
 
     async def disconnect(self):
@@ -606,17 +755,7 @@ class TradingAgent:
     async def run_parallel(self, trade_interval: int = 30):
         """
         Run the trading agent with PARALLEL prediction and execution.
-        
-        How it works:
-        1. Background task continuously runs AI predictions, caching results
-        2. Main loop checks for fresh cached predictions and executes trades
-        3. Execution is instant (< 1 second) since AI already finished thinking
-        
-        Timeline:
-        T=0s:   Background AI starts analyzing EURUSD
-        T=60s:  Background AI finishes, caches "CALL EURUSD, 80%"
-        T=65s:  Main loop sees fresh cache, executes trade instantly
-        T=120s: Background AI finishes fresh analysis, updates cache
+        Auto-refreshes SSID when it expires using cookies.
         """
         logger.info("="*60)
         logger.info("POCKET OPTIONS AI TRADING AGENT (PARALLEL MODE)")
@@ -627,12 +766,23 @@ class TradingAgent:
         logger.info(f"Prediction freshness: {self.prediction_freshness}s")
         logger.info(f"Min confidence: {self.min_confidence:.0%}")
         logger.info(f"Max trades per session: {self.max_trades}")
+        logger.info(f"Auto-refresh: {'ENABLED' if self.cookies_file else 'DISABLED'}")
         logger.info("="*60)
 
         # Connect to Pocket Option
         if not await self.connect():
-            logger.error("Failed to connect. Exiting.")
-            return
+            # Try to get SSID from cookies if available
+            if self.cookies_file and not self.ssid:
+                logger.info("No SSID provided, attempting to get from cookies...")
+                new_ssid = await self._refresh_ssid_via_cookies()
+                if new_ssid and await self.connect():
+                    pass  # Connected successfully
+                else:
+                    logger.error("Failed to get SSID from cookies. Exiting.")
+                    return
+            else:
+                logger.error("Failed to connect. Exiting.")
+                return
 
         self.running = True
         
@@ -655,10 +805,24 @@ class TradingAgent:
                         logger.info(f"\n{'='*50}")
                         logger.info(f"Checking {asset}...")
                         
-                        # Get current price for logging
-                        context = await self.get_market_context(asset)
-                        if context:
-                            logger.info(f"Price: {context.current_price} | Trend: {context.candles_summary.get('trend')}")
+                        # Get current price for logging (also checks connection)
+                        try:
+                            context = await self.get_market_context(asset)
+                            if context:
+                                logger.info(f"Price: {context.current_price} | Trend: {context.candles_summary.get('trend')}")
+                        except Exception as e:
+                            # Check if SSID expired
+                            if 'auth' in str(e).lower() or 'session' in str(e).lower() or 'connection' in str(e).lower():
+                                logger.warning("SSID appears expired during market fetch")
+                                if self.cookies_file:
+                                    if await self._handle_ssid_expiry():
+                                        continue  # Retry this asset
+                                    else:
+                                        self.running = False
+                                        break
+                            else:
+                                logger.error(f"Market context error: {e}")
+                                continue
                         
                         # Get cached prediction (INSTANT - no waiting for AI)
                         decision = await self.get_cached_prediction_async(asset)
@@ -675,11 +839,28 @@ class TradingAgent:
                         
                         # Execute trade if confidence threshold met
                         if decision.direction != TradeDirection.HOLD and decision.confidence >= self.min_confidence:
-                            trade = await self.execute_trade(decision, asset)
-                            if trade:
-                                # Start result checker in background (don't block)
-                                asyncio.create_task(self._track_trade_result(trade))
-                                self.trades_made += 1
+                            try:
+                                trade = await self.execute_trade(decision, asset)
+                                if trade:
+                                    # Start result checker in background (don't block)
+                                    asyncio.create_task(self._track_trade_result(trade))
+                                    self.trades_made += 1
+                            except Exception as e:
+                                # Check if SSID expired during trade execution
+                                if 'auth' in str(e).lower() or 'session' in str(e).lower():
+                                    logger.warning("SSID expired during trade execution")
+                                    if self.cookies_file:
+                                        if await self._handle_ssid_expiry():
+                                            # Retry the trade
+                                            trade = await self.execute_trade(decision, asset)
+                                            if trade:
+                                                asyncio.create_task(self._track_trade_result(trade))
+                                                self.trades_made += 1
+                                        else:
+                                            self.running = False
+                                            break
+                                else:
+                                    logger.error(f"Trade execution error: {e}")
                         else:
                             logger.info(f"Skipping - {decision.direction.value} @ {decision.confidence:.0%}")
                         
@@ -697,6 +878,10 @@ class TradingAgent:
                     break
                 except Exception as e:
                     logger.error(f"Trading cycle error: {e}")
+                    # Check for auth errors
+                    if 'auth' in str(e).lower() or 'session' in str(e).lower():
+                        if self.cookies_file and await self._handle_ssid_expiry():
+                            continue
                     await asyncio.sleep(10)
 
         finally:
@@ -785,24 +970,27 @@ async def main():
 
     # Get SSID from environment or prompt
     ssid = os.environ.get("POCKET_OPTION_SSID")
+    
+    # Get cookies file path for auto-refresh
+    cookies_file = os.environ.get("POCKET_OPTION_COOKIES", "/home/workspace/pocket-options-agent/cookies.json")
 
     if not ssid:
         print("Pocket Options Trading Agent")
         print("="*40)
-        print("\nYou need to provide your Pocket Option SSID.")
+        print("\nYou can provide SSID manually OR use cookies for auto-refresh.")
         print("\nHow to get your SSID:")
         print("1. Open Pocket Option in your browser")
         print("2. Open Developer Tools (F12)")
         print("3. Go to Network tab, filter by WS (WebSocket)")
         print("4. Find message starting with 42[\"auth\"")
         print("5. Copy the ENTIRE message including 42[\"auth\",{...}]")
+        print("\nOr set POCKET_OPTION_COOKIES to path of your exported cookies.json")
         print("\n")
 
-        ssid = input("Enter your SSID (or set POCKET_OPTION_SSID env var): ").strip()
+        ssid = input("Enter your SSID (or press Enter to use cookies): ").strip()
 
         if not ssid:
-            print("No SSID provided. Exiting.")
-            return
+            print(f"Will use cookies from: {cookies_file}")
 
     # Configuration
     is_demo = os.environ.get("POCKET_OPTION_DEMO", "true").lower() == "true"
@@ -817,9 +1005,10 @@ async def main():
     assets_str = os.environ.get("POCKET_OPTION_ASSETS", "EURUSD_otc,GBPUSD_otc,USDJPY_otc")
     assets = [a.strip() for a in assets_str.split(",")]
 
-    # Create agent
+    # Create agent with cookies for auto-refresh
     agent = TradingAgent(
         ssid=ssid,
+        cookies_file=cookies_file,
         is_demo=is_demo,
         trade_amount=trade_amount,
         trade_duration=trade_duration,
