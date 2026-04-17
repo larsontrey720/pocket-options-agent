@@ -102,6 +102,74 @@ POCKET_OPTION_ASSETS="EURUSD_otc,GBPUSD_otc" \
 python agent.py
 ```
 
+## How It Works
+
+### The Problem: Slow AI Thinking
+
+Traditional bots wait for AI analysis before each trade:
+
+```
+T=0s    Market: Price $1.00
+        AI starts thinking...
+        
+T=60s   Market: Price $0.95  (price moved while AI thought!)
+        AI says "CALL at $1.00"
+        Trade executed at wrong price
+```
+
+**Result**: Stale decisions, missed opportunities.
+
+### The Solution: Parallel Prediction
+
+This agent thinks AHEAD in the background:
+
+```
+BACKGROUND (always running):
+T=0s    AI starts analyzing EURUSD
+T=60s   AI finishes, caches "PUT @ 85%"
+T=120s  AI updates cache with fresh analysis
+
+MAIN LOOP (instant execution):
+T=65s   Check cache -> "PUT @ 85%" found
+        Execute trade IMMEDIATELY (< 1 second)
+```
+
+**Result**: Always ready, instant execution, fresh decisions.
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────┐
+│           TRADING AGENT (Parallel Mode)         │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│   ┌─────────────┐      ┌──────────────────┐    │
+│   │  Background │      │    Main Loop     │    │
+│   │  AI Task    │      │    (Trading)     │    │
+│   │             │      │                  │    │
+│   │  Analyze    │──────│  Prediction      │    │
+│   │  Cache      │      │  Cache           │    │
+│   │  Repeat     │      │  Execute Trade   │    │
+│   └─────────────┘      └──────────────────┘    │
+│         │                      │               │
+│         │    Prediction Cache  │               │
+│         └──────────────────────┘               │
+│                   │                            │
+│         ┌─────────▼─────────┐                   │
+│         │   Pocket Option   │                   │
+│         │   WebSocket API   │                   │
+│         └───────────────────┘                   │
+└─────────────────────────────────────────────────┘
+```
+
+### Key Settings
+
+| Setting | What It Does |
+|---------|--------------|
+| `prediction_freshness` | How old a cached prediction can be before it's considered stale (default: 90s) |
+| `trade_interval` | Time between trade execution checks (default: 30s) |
+| Background AI runs continuously, analyzing each asset in rotation |
+
 ## AI Decision Process
 
 The agent uses the moonshotai/kimi-k2.5 model to:
