@@ -211,11 +211,15 @@ Analyze this data and provide your trading decision as JSON."""
             )
 
         try:
+            # Log raw response for debugging
+            logger.info(f"AI RAW RESPONSE: {response[:200]}...")
+            
             # Extract JSON from response
             json_start = response.find("{")
             json_end = response.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
                 json_str = response[json_start:json_end]
+                logger.info(f"EXTRACTED JSON: {json_str}")
                 data = json.loads(json_str)
 
                 direction_map = {
