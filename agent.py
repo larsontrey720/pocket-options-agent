@@ -66,7 +66,7 @@ def normalize_ssid(ssid: str) -> str:
         
         # Reconstruct SSID
         normalized = f'42["auth",{json.dumps(data)}]'
-        logger.info(f"Normalized SSID: {normalized[:80]}...")
+        logger.info(f"Normalized SSID: {normalized[:80]}...')
         return normalized
         
     except json.JSONDecodeError:
@@ -340,58 +340,44 @@ class TradingAgent:
                 
                 page = await context.new_page()
                 
-                # Use CDP to capture WebSocket frames
-                cdp = await context.new_cdp_session(page)
-                await cdp.send('Network.enable')
-                
-                async def on_ws_frame(event):
-                    nonlocal captured_ssid
-                    try:
-                        # Check both sent and received frames
-                        payload = event.get('requestPayload', '') or event.get('responsePayload', '')
-                        if isinstance(payload, dict):
-                            return
-                        if isinstance(payload, bytes):
-                            payload = payload.decode('utf-8', errors='ignore')
-                        
-                        # Look for auth message
-                        if '42["auth"' in str(payload) or ('"session"' in str(payload) and '"uid"' in str(payload)):
-                            # Extract the auth message
-                            import re
-                            match = re.search(r'42\["auth",\s*\{[^}]+\}\s*\]', str(payload))
-                            if match:
-                                captured_ssid = match.group(0)
-                                logger.info(f"CAPTURED SSID via CDP: {captured_ssid[:80]}...")
-                    except Exception as e:
-                        logger.debug(f"Frame parse error: {e}")
-                
-                cdp.on('Network.webSocketFrameSent', on_ws_frame)
-                cdp.on('Network.webSocketFrameReceived', on_ws_frame)
+                # Inject script to capture WebSocket messages
+                await page.add_init_script("""
+                    window.__captured_ssid = null;
+                    const originalWS = window.WebSocket;
+                    window.WebSocket = function(...args) {
+                        const ws = new originalWS(...args);
+                        const originalSend = ws.send;
+                        ws.send = function(data) {
+                            if (typeof data === 'string' && data.includes('"auth"')) {
+                                window.__captured_ssid = data;
+                            }
+                            return originalSend.apply(ws, arguments);
+                        };
+                        return ws;
+                    };
+                """)
                 
                 # Navigate to Pocket Option
                 logger.info("Navigating to Pocket Option...")
-                
-                # Use page.goto with wait_until
-                response = await page.goto(
+                await page.goto(
                     "https://pocketoption.com/en/cabinet/demo-quick-high-low",
-                    wait_until='domcontentloaded',
+                    wait_until='networkidle',
                     timeout=30000
                 )
                 
-                # Wait for WebSocket to connect and send auth
+                # Wait for WebSocket to connect
                 logger.info("Waiting for WebSocket auth...")
                 for i in range(10):
                     await asyncio.sleep(2)
+                    captured_ssid = await page.evaluate('window.__captured_ssid')
                     if captured_ssid:
+                        logger.info(f"CAPTURED SSID: {captured_ssid[:80]}...")
                         break
-                    logger.debug(f"Waiting... attempt {i+1}/10")
                 
                 await browser.close()
                 
         except Exception as e:
             logger.error(f"SSID refresh failed: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
             return None
         
         if captured_ssid:
@@ -768,18 +754,8 @@ class TradingAgent:
 
         # Connect to Pocket Option
         if not await self.connect():
-            # Try to get SSID from cookies if available
-            if self.cookies_file and not self.ssid:
-                logger.info("No SSID provided, attempting to get from cookies...")
-                new_ssid = await self._refresh_ssid_via_cookies()
-                if new_ssid and await self.connect():
-                    pass  # Connected successfully
-                else:
-                    logger.error("Failed to get SSID from cookies. Exiting.")
-                    return
-            else:
-                logger.error("Failed to connect. Exiting.")
-                return
+            logger.error("Failed to connect. Exiting.")
+            return
 
         self.running = True
         
