@@ -172,45 +172,22 @@ class AIEngine:
     async def analyze_market(self, context: MarketContext) -> TradeDecision:
         """Analyze market data and generate trading decision"""
 
-        system_prompt = """You are an expert binary options trading AI. Your job is to analyze market data and make trading decisions.
-
-RULES:
-1. Only recommend CALL if you see clear bullish signals
-2. Only recommend PUT if you see clear bearish signals  
-3. Recommend HOLD if signals are mixed or unclear
-4. Base decisions on price action, trends, and momentum
-5. Consider risk management - smaller amounts when uncertain
-
-OUTPUT FORMAT (STRICT JSON):
-{
-    "direction": "call" | "put" | "hold",
-    "confidence": 0.0-1.0,
-    "reasoning": "Brief explanation of your analysis",
-    "amount": 1-10,
-    "duration": 60-300
-}
-
-Respond ONLY with valid JSON. No other text."""
-
-        candles_str = json.dumps(context.candles_summary, indent=2)
-        recent_trades_str = json.dumps(context.recent_trades[-5:] if context.recent_trades else [], indent=2)
-
-        user_message = f"""MARKET ANALYSIS REQUEST
+        # Simplified prompt - no system message
+        user_message = f"""Analyze this forex market and respond with ONLY JSON (no markdown, no explanation):
 
 Asset: {context.asset}
-Current Price: {context.current_price}
-Account Balance: ${context.balance:.2f}
-Timestamp: {context.timestamp}
+Price: {context.current_price}
+Trend: {context.candles_summary.get('trend', 'unknown')}
+Momentum: {context.candles_summary.get('momentum', 'unknown')}
+Up moves: {context.candles_summary.get('up_moves', 0)}
+Down moves: {context.candles_summary.get('down_moves', 0)}
 
-RECENT CANDLE DATA:
-{candles_str}
+Rules: CALL if bullish, PUT if bearish, HOLD if unclear. Confidence 0.0-1.0.
 
-RECENT TRADES:
-{recent_trades_str}
+Respond ONLY with: {{"direction":"call","confidence":0.8,"reasoning":"brief reason","amount":5,"duration":60}}"""
 
-Analyze this data and provide your trading decision as JSON."""
-
-        response = await self.chat(system_prompt, user_message)
+        # No system prompt, just user message
+        response = await self.chat("", user_message)
 
         if not response:
             logger.warning("AI returned empty response, defaulting to HOLD")
