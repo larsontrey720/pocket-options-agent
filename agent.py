@@ -754,8 +754,27 @@ class TradingAgent:
 
         # Connect to Pocket Option
         if not await self.connect():
-            logger.error("Failed to connect. Exiting.")
-            return
+            # Try to get SSID from cookies if we have cookies but no ssid
+            if self.cookies_file and not self.ssid:
+                logger.info("No SSID provided, attempting to get from cookies...")
+                new_ssid = await self._refresh_ssid_via_cookies()
+                if new_ssid and await self.connect():
+                    pass  # Connected successfully
+                else:
+                    logger.error("Failed to get SSID from cookies. Exiting.")
+                    return
+            elif self.cookies_file and self.ssid:
+                # SSID was provided but connection failed - try refresh
+                logger.info("Connection failed, attempting to refresh SSID from cookies...")
+                new_ssid = await self._refresh_ssid_via_cookies()
+                if new_ssid and await self.connect():
+                    pass  # Connected successfully
+                else:
+                    logger.error("Failed to connect after refresh. Exiting.")
+                    return
+            else:
+                logger.error("Failed to connect. Exiting.")
+                return
 
         self.running = True
         
@@ -887,8 +906,27 @@ class TradingAgent:
 
         # Connect to Pocket Option
         if not await self.connect():
-            logger.error("Failed to connect. Exiting.")
-            return
+            # Try to get SSID from cookies if we have cookies but no ssid
+            if self.cookies_file and not self.ssid:
+                logger.info("No SSID provided, attempting to get from cookies...")
+                new_ssid = await self._refresh_ssid_via_cookies()
+                if new_ssid and await self.connect():
+                    pass  # Connected successfully
+                else:
+                    logger.error("Failed to get SSID from cookies. Exiting.")
+                    return
+            elif self.cookies_file and self.ssid:
+                # SSID was provided but connection failed - try refresh
+                logger.info("Connection failed, attempting to refresh SSID from cookies...")
+                new_ssid = await self._refresh_ssid_via_cookies()
+                if new_ssid and await self.connect():
+                    pass  # Connected successfully
+                else:
+                    logger.error("Failed to connect after refresh. Exiting.")
+                    return
+            else:
+                logger.error("Failed to connect. Exiting.")
+                return
 
         self.running = True
 
