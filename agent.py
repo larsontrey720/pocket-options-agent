@@ -440,28 +440,40 @@ class TradingAgent:
                         # Get fresh market data
                         context = await self.get_market_context(asset)
                         if not context:
-                            logger.debug(f"No context for {asset}, skipping")
+                            logger.debug(f"[BG] No context for {asset}, skipping")
                             continue
-                        
-                        # Run AI analysis
-                        logger.info(f"[BG] Analyzing {asset}...")
-                        decision = await ai_session.analyze_market(context)
-                        
-                        # Cache the prediction with timestamp
-                        async with self.prediction_lock:
-                            self.prediction_cache[asset] = (decision, datetime.now())
-                        
-                        logger.info(
-                            f"[BG] Cached prediction for {asset}: "
-                            f"{decision.direction.value.upper()} @ {decision.confidence:.0%}"
-                        )
-                        
                     except Exception as e:
-                        logger.error(f"[BG] Prediction error for {asset}: {e}")
-                        
-                    # Small delay between assets to not overwhelm
-                    await asyncio.sleep(2)
+                        # Connection error raised - try to reconnect
+                        error_str = str(e)
+                        if 'Not connected' in error_str or 'connection' in error_str.lower():
+                            logger.error(f"[BG] Connection lost: {e}")
+                            if self.cookies_file:
+                                logger.info("[BG] Attempting SSID refresh and reconnect...")
+                                if await self._handle_ssid_expiry():
+                                    logger.info("[BG] Reconnected! Retrying prediction...")
+                                    continue
+                                else:
+                                    logger.error("[BG] Failed to reconnect, stopping")
+                                    self.running = False
+                                    break
+                            continue
                     
+                    # Run AI analysis
+                    logger.info(f"[BG] Analyzing {asset}...")
+                    decision = await ai_session.analyze_market(context)
+                    
+                    # Cache the prediction with timestamp
+                    async with self.prediction_lock:
+                        self.prediction_cache[asset] = (decision, datetime.now())
+                    
+                    logger.info(
+                        f"[BG] Cached prediction for {asset}: "
+                        f"{decision.direction.value.upper()} @ {decision.confidence:.0%}"
+                    )
+                    
+                # Small delay between assets to not overwhelm
+                await asyncio.sleep(2)
+                
         except asyncio.CancelledError:
             logger.info("Background prediction loop cancelled")
         finally:
@@ -592,6 +604,10 @@ class TradingAgent:
     async def get_market_context(self, asset: str) -> Optional[MarketContext]:
         """Gather market context for AI analysis"""
         try:
+            # Check if connected first
+            if self.client is None:
+                raise Exception("Not connected to PocketOption - client is None")
+            
             # Get balance
             balance_info = await self.client.get_balance()
             balance = balance_info.balance
@@ -615,6 +631,11 @@ class TradingAgent:
                 timestamp=datetime.now().isoformat(),
             )
         except Exception as e:
+            error_msg = str(e)
+            # Re-raise connection errors so caller can handle them
+            if 'Not connected' in error_msg or 'connection' in error_msg.lower():
+                logger.error(f"Connection error in get_market_context: {e}")
+                raise  # Re-raise so background loop can handle it
             logger.error(f"Error getting market context: {e}")
             return None
 
