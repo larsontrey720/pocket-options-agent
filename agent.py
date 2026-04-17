@@ -66,7 +66,7 @@ def normalize_ssid(ssid: str) -> str:
         
         # Reconstruct SSID
         normalized = f'42["auth",{json.dumps(data)}]'
-        logger.info(f"Normalized SSID: {normalized[:80]}...')
+        logger.info(f"Normalized SSID: {normalized[:80]}...")
         return normalized
         
     except json.JSONDecodeError:
