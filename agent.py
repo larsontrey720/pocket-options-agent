@@ -263,11 +263,12 @@ Respond ONLY with: {{"direction":"call","confidence":0.8,"reasoning":"brief reas
 
 
 class TradingAgent:
-    """Main trading agent with parallel prediction and execution"""
+    """Main trading agent with parallel prediction and auto SSID refresh"""
 
     def __init__(
         self,
-        ssid: str,
+        ssid: str = None,
+        cookies_file: str = None,  # Path to cookies.json for auto-refresh
         is_demo: bool = True,
         trade_amount: float = 1.0,
         trade_duration: int = 60,
