@@ -126,8 +126,8 @@ class AIEngine:
         if self.session:
             await self.session.close()
 
-    async def chat(self, system_prompt: str, user_message: str) -> str:
-        """Send a chat completion request to NVIDIA proxy"""
+    async def chat(self, system_prompt: str, user_message: str, retries: int = 3) -> str:
+        """Send a chat completion request to NVIDIA proxy with retries"""
         headers = {"Content-Type": "application/json"}
         payload = {
             "model": self.model,
@@ -136,26 +136,38 @@ class AIEngine:
                 {"role": "user", "content": user_message},
             ],
             "temperature": 0.3,
-            "max_tokens": 1000,
+            "max_tokens": 500,  # Reduced for faster response
         }
 
-        try:
-            async with self.session.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data["choices"][0]["message"]["content"]
-                else:
-                    error_text = await response.text()
-                    logger.error(f"AI API error {response.status}: {error_text}")
-                    return ""
-        except Exception as e:
-            logger.error(f"AI request failed: {e}")
-            return ""
+        for attempt in range(retries):
+            try:
+                async with self.session.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"AI API error {response.status}: {error_text}")
+                        if attempt < retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return ""
+            except asyncio.TimeoutError:
+                logger.warning(f"AI request timed out (attempt {attempt + 1}/{retries})")
+                if attempt < retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+            except Exception as e:
+                logger.error(f"AI request failed: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(2)
+                    continue
+        return ""
 
     async def analyze_market(self, context: MarketContext) -> TradeDecision:
         """Analyze market data and generate trading decision"""
@@ -212,13 +224,24 @@ Analyze this data and provide your trading decision as JSON."""
 
         try:
             # Log raw response for debugging
-            logger.info(f"AI RAW RESPONSE: {response[:200]}...")
+            logger.info(f"AI RAW RESPONSE: {response[:300]}...")
+            
+            # Strip markdown code blocks if present
+            cleaned = response.strip()
+            if cleaned.startswith("```"):
+                # Remove ```json or ``` at start
+                lines = cleaned.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                cleaned = "\n".join(lines)
             
             # Extract JSON from response
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
+            json_start = cleaned.find("{")
+            json_end = cleaned.rfind("}") + 1
             if json_start >= 0 and json_end > json_start:
-                json_str = response[json_start:json_end]
+                json_str = cleaned[json_start:json_end]
                 logger.info(f"EXTRACTED JSON: {json_str}")
                 data = json.loads(json_str)
 
