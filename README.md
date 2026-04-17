@@ -54,10 +54,30 @@ Set environment variables or pass directly:
 
 ## Usage
 
-### Run with environment variables
+### Option 1: Persistent Agent (Recommended)
+
+Auto-refreshes SSID from browser cookies - runs continuously:
 
 ```bash
-export POCKET_OPTION_SSID='42["auth",{"session":"xxx","isDemo":1,"uid":12345,"platform":1}]'
+# 1. Export cookies from your browser (Cookie Editor extension)
+# 2. Save to cookies.json in the project folder
+# 3. Run persistent agent
+pip install playwright && python -m playwright install chromium
+python persistent_agent.py
+```
+
+The persistent agent will:
+- Auto-refresh SSID using Playwright + cookies
+- Cache SSID for 5 minutes to minimize browser launches
+- Reconnect automatically if connection drops
+- Run trading loop continuously
+
+### Option 2: Manual SSID
+
+Run with environment variables:
+
+```bash
+export POCKET_OPTION_SSID='42[\"auth\",{\"session\":\"xxx\",\"isDemo\":1,\"uid\":12345,\"platform\":1}]'
 python agent.py
 ```
 
