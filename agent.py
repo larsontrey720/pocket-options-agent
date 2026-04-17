@@ -263,7 +263,7 @@ Respond ONLY with: {{"direction":"call","confidence":0.8,"reasoning":"brief reas
 
 
 class TradingAgent:
-    """Main trading agent that coordinates AI analysis with Pocket Option trading"""
+    """Main trading agent with parallel prediction and execution"""
 
     def __init__(
         self,
@@ -274,6 +274,7 @@ class TradingAgent:
         assets: list = None,
         max_trades_per_session: int = 10,
         min_confidence: float = 0.6,
+        prediction_freshness: int = 30,  # Max age of cached prediction in seconds
     ):
         self.ssid = normalize_ssid(ssid)  # Convert sessionToken -> session
         self.is_demo = is_demo
@@ -282,6 +283,7 @@ class TradingAgent:
         self.assets = assets or ["EURUSD_otc", "GBPUSD_otc", "USDJPY_otc"]
         self.max_trades = max_trades_per_session
         self.min_confidence = min_confidence
+        self.prediction_freshness = prediction_freshness
 
         self.client = None
         self.ai_engine: Optional[AIEngine] = None
@@ -289,6 +291,107 @@ class TradingAgent:
         self.trades_made = 0
         self.trade_history: list = []
         self.current_asset_index = 0
+        
+        # Parallel prediction system
+        self.prediction_cache: dict = {}  # {asset: (decision, timestamp)}
+        self.prediction_lock = asyncio.Lock()
+        self.prediction_task: Optional[asyncio.Task] = None
+
+    async def _background_prediction_loop(self):
+        """
+        Continuously run AI predictions in background.
+        Each asset gets analyzed in rotation, predictions are cached.
+        When it's time to trade, we use the cached prediction (instant execution).
+        """
+        logger.info("Background prediction loop started")
+        ai_session = None
+        
+        try:
+            # Create a single AI session for the background loop
+            ai_session = AIEngine()
+            await ai_session.__aenter__()
+            
+            while self.running:
+                for asset in self.assets:
+                    if not self.running:
+                        break
+                    
+                    try:
+                        # Get fresh market data
+                        context = await self.get_market_context(asset)
+                        if not context:
+                            logger.debug(f"No context for {asset}, skipping")
+                            continue
+                        
+                        # Run AI analysis
+                        logger.info(f"[BG] Analyzing {asset}...")
+                        decision = await ai_session.analyze_market(context)
+                        
+                        # Cache the prediction with timestamp
+                        async with self.prediction_lock:
+                            self.prediction_cache[asset] = (decision, datetime.now())
+                        
+                        logger.info(
+                            f"[BG] Cached prediction for {asset}: "
+                            f"{decision.direction.value.upper()} @ {decision.confidence:.0%}"
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"[BG] Prediction error for {asset}: {e}")
+                        
+                    # Small delay between assets to not overwhelm
+                    await asyncio.sleep(2)
+                    
+        except asyncio.CancelledError:
+            logger.info("Background prediction loop cancelled")
+        finally:
+            if ai_session:
+                await ai_session.__aexit__(None, None, None)
+            logger.info("Background prediction loop stopped")
+
+    def get_cached_prediction(self, asset: str, max_age_seconds: int = None) -> Optional[TradeDecision]:
+        """
+        Get cached prediction for an asset if it's fresh enough.
+        Returns None if no prediction or prediction is too old.
+        """
+        max_age = max_age_seconds or self.prediction_freshness
+        
+        async def _get():
+            async with self.prediction_lock:
+                if asset not in self.prediction_cache:
+                    return None
+                
+                decision, timestamp = self.prediction_cache[asset]
+                age = (datetime.now() - timestamp).total_seconds()
+                
+                if age > max_age:
+                    logger.info(f"Cached prediction for {asset} is {age:.0f}s old (max {max_age}s)")
+                    return None
+                
+                logger.info(f"Using cached prediction for {asset} (age: {age:.0f}s)")
+                return decision
+        
+        # If we're in an async context, this needs to be awaited
+        # For sync access, we return the coroutine
+        return _get()
+
+    async def get_cached_prediction_async(self, asset: str, max_age_seconds: int = None) -> Optional[TradeDecision]:
+        """Async version of get_cached_prediction"""
+        max_age = max_age_seconds or self.prediction_freshness
+        
+        async with self.prediction_lock:
+            if asset not in self.prediction_cache:
+                return None
+            
+            decision, timestamp = self.prediction_cache[asset]
+            age = (datetime.now() - timestamp).total_seconds()
+            
+            if age > max_age:
+                logger.info(f"Cached prediction for {asset} is {age:.0f}s old (max {max_age}s)")
+                return None
+            
+            logger.info(f"Using cached prediction for {asset} (age: {age:.0f}s)")
+            return decision
 
     def _summarize_candles(self, candles: list) -> dict:
         """Summarize candle data for AI analysis"""
@@ -499,8 +602,120 @@ class TradingAgent:
         else:
             logger.info(f"Skipping trade - confidence {decision.confidence:.0%} below threshold or HOLD")
 
+    async def run_parallel(self, trade_interval: int = 30):
+        """
+        Run the trading agent with PARALLEL prediction and execution.
+        
+        How it works:
+        1. Background task continuously runs AI predictions, caching results
+        2. Main loop checks for fresh cached predictions and executes trades
+        3. Execution is instant (< 1 second) since AI already finished thinking
+        
+        Timeline:
+        T=0s:   Background AI starts analyzing EURUSD
+        T=60s:  Background AI finishes, caches "CALL EURUSD, 80%"
+        T=65s:  Main loop sees fresh cache, executes trade instantly
+        T=120s: Background AI finishes fresh analysis, updates cache
+        """
+        logger.info("="*60)
+        logger.info("POCKET OPTIONS AI TRADING AGENT (PARALLEL MODE)")
+        logger.info("="*60)
+        logger.info(f"Mode: {'DEMO' if self.is_demo else 'REAL'}")
+        logger.info(f"Assets: {', '.join(self.assets)}")
+        logger.info(f"Trade interval: {trade_interval}s")
+        logger.info(f"Prediction freshness: {self.prediction_freshness}s")
+        logger.info(f"Min confidence: {self.min_confidence:.0%}")
+        logger.info(f"Max trades per session: {self.max_trades}")
+        logger.info("="*60)
+
+        # Connect to Pocket Option
+        if not await self.connect():
+            logger.error("Failed to connect. Exiting.")
+            return
+
+        self.running = True
+        
+        # Start background prediction loop
+        self.prediction_task = asyncio.create_task(self._background_prediction_loop())
+        logger.info("Started background prediction loop")
+        
+        # Wait for first predictions to populate cache
+        logger.info("Waiting for initial predictions...")
+        await asyncio.sleep(10)
+
+        try:
+            while self.running and self.trades_made < self.max_trades:
+                try:
+                    # Cycle through assets
+                    for asset in self.assets:
+                        if not self.running or self.trades_made >= self.max_trades:
+                            break
+                        
+                        logger.info(f"\n{'='*50}")
+                        logger.info(f"Checking {asset}...")
+                        
+                        # Get current price for logging
+                        context = await self.get_market_context(asset)
+                        if context:
+                            logger.info(f"Price: {context.current_price} | Trend: {context.candles_summary.get('trend')}")
+                        
+                        # Get cached prediction (INSTANT - no waiting for AI)
+                        decision = await self.get_cached_prediction_async(asset)
+                        
+                        if decision is None:
+                            logger.info(f"No fresh prediction for {asset}, waiting...")
+                            continue
+                        
+                        logger.info(
+                            f"CACHED DECISION: {decision.direction.value.upper()} | "
+                            f"CONF: {decision.confidence:.0%} | "
+                            f"REASON: {decision.reasoning[:50]}..."
+                        )
+                        
+                        # Execute trade if confidence threshold met
+                        if decision.direction != TradeDirection.HOLD and decision.confidence >= self.min_confidence:
+                            trade = await self.execute_trade(decision, asset)
+                            if trade:
+                                # Start result checker in background (don't block)
+                                asyncio.create_task(self._track_trade_result(trade))
+                                self.trades_made += 1
+                        else:
+                            logger.info(f"Skipping - {decision.direction.value} @ {decision.confidence:.0%}")
+                        
+                        # Brief pause between assets
+                        await asyncio.sleep(2)
+                    
+                    # Wait before next trade cycle
+                    if self.trades_made < self.max_trades and self.running:
+                        logger.info(f"\nNext trade cycle in {trade_interval}s...")
+                        await asyncio.sleep(trade_interval)
+
+                except KeyboardInterrupt:
+                    logger.info("\nStopping agent...")
+                    self.running = False
+                    break
+                except Exception as e:
+                    logger.error(f"Trading cycle error: {e}")
+                    await asyncio.sleep(10)
+
+        finally:
+            # Stop background prediction loop
+            if self.prediction_task:
+                self.prediction_task.cancel()
+                try:
+                    await self.prediction_task
+                except asyncio.CancelledError:
+                    pass
+            
+            await self.disconnect()
+            self._print_summary()
+
+    async def _track_trade_result(self, trade: TradeResult):
+        """Track trade result in background without blocking main loop"""
+        await self.check_trade_result(trade)
+
     async def run(self, interval: int = 120):
-        """Run the trading agent"""
+        """Run the trading agent (legacy sequential mode)"""
         logger.info("="*60)
         logger.info("POCKET OPTIONS AI TRADING AGENT")
         logger.info("="*60)
@@ -592,14 +807,16 @@ async def main():
     is_demo = os.environ.get("POCKET_OPTION_DEMO", "true").lower() == "true"
     trade_amount = float(os.environ.get("POCKET_OPTION_AMOUNT", "1"))
     trade_duration = int(os.environ.get("POCKET_OPTION_DURATION", "60"))
-    interval = int(os.environ.get("POCKET_OPTION_INTERVAL", "120"))
+    trade_interval = int(os.environ.get("POCKET_OPTION_TRADE_INTERVAL", "30"))
     max_trades = int(os.environ.get("POCKET_OPTION_MAX_TRADES", "10"))
     min_confidence = float(os.environ.get("POCKET_OPTION_MIN_CONFIDENCE", "0.6"))
+    prediction_freshness = int(os.environ.get("POCKET_OPTION_PREDICTION_FRESHNESS", "90"))
+    use_parallel = os.environ.get("POCKET_OPTION_PARALLEL", "true").lower() == "true"
 
     assets_str = os.environ.get("POCKET_OPTION_ASSETS", "EURUSD_otc,GBPUSD_otc,USDJPY_otc")
     assets = [a.strip() for a in assets_str.split(",")]
 
-    # Create and run agent
+    # Create agent
     agent = TradingAgent(
         ssid=ssid,
         is_demo=is_demo,
@@ -608,10 +825,18 @@ async def main():
         assets=assets,
         max_trades_per_session=max_trades,
         min_confidence=min_confidence,
+        prediction_freshness=prediction_freshness,
     )
 
     try:
-        await agent.run(interval=interval)
+        if use_parallel:
+            # PARALLEL MODE - instant execution with cached predictions
+            print("\nRunning in PARALLEL mode (background predictions)")
+            await agent.run_parallel(trade_interval=trade_interval)
+        else:
+            # LEGACY MODE - sequential think then execute
+            print("\nRunning in SEQUENTIAL mode (slower execution)")
+            await agent.run(interval=120)
     except KeyboardInterrupt:
         print("\nStopping...")
         agent.stop()
