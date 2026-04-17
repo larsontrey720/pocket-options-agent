@@ -25,6 +25,13 @@ except ImportError:
     HAS_MEMORY = False
     TradingMemory = None
 
+# Import multi-timeframe analysis
+try:
+    from multi_timeframe import analyze_multi_timeframe, get_mtf_context_for_ai
+    HAS_MTF = True
+except ImportError:
+    HAS_MTF = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -629,7 +636,7 @@ class TradingAgent:
             logger.info("Disconnected from Pocket Option")
 
     async def get_market_context(self, asset: str) -> Optional[MarketContext]:
-        """Gather market context for AI analysis"""
+        """Gather market context for AI analysis with multi-timeframe support"""
         try:
             # Check if connected first
             if self.client is None:
@@ -639,15 +646,44 @@ class TradingAgent:
             balance_info = await self.client.get_balance()
             balance = balance_info.balance
 
-            # Get candles (60s timeframe, last 100)
-            candles = await self.client.get_candles(asset, 60, count=100)
+            # Get candles for multiple timeframes
+            # 1 minute candles (current trading timeframe)
+            candles_1m = await self.client.get_candles(asset, 60, count=100)
+            
+            # 5 minute candles (intermediate trend) - 300 seconds
+            candles_5m = None
+            try:
+                candles_5m = await self.client.get_candles(asset, 300, count=50)
+            except:
+                pass
+            
+            # 15 minute candles (higher timeframe trend) - 900 seconds
+            candles_15m = None
+            try:
+                candles_15m = await self.client.get_candles(asset, 900, count=30)
+            except:
+                pass
 
-            if not candles:
+            if not candles_1m:
                 logger.warning(f"No candle data for {asset}")
                 return None
 
-            current_price = candles[-1].close if candles else 0
-            candles_summary = self._summarize_candles(candles)
+            current_price = candles_1m[-1].close if candles_1m else 0
+            candles_summary = self._summarize_candles(candles_1m)
+            
+            # Add multi-timeframe analysis
+            if HAS_MTF:
+                mtf_result = analyze_multi_timeframe(candles_1m, candles_5m, candles_15m)
+                candles_summary["mtf"] = mtf_result
+                logger.info(
+                    f"MTF: {mtf_result['direction']} @ {mtf_result['alignment']:.0%} | "
+                    f"Trade allowed: {mtf_result['trade_allowed']}"
+                )
+                
+                # Block trades if MTF alignment is too low
+                if not mtf_result["trade_allowed"]:
+                    candles_summary["mtf_blocked"] = True
+                    candles_summary["mtf_reason"] = f"Low alignment ({mtf_result['alignment']:.0%}) or trend conflict"
 
             return MarketContext(
                 asset=asset,
