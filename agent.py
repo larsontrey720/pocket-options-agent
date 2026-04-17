@@ -132,15 +132,15 @@ class AIEngine:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
+                {"role": "user", "content": user_message}
             ],
+            "stream": True,  # Enable streaming
             "temperature": 0.3,
-            "max_tokens": 500,  # Reduced for faster response
         }
 
         for attempt in range(retries):
             try:
+                full_content = ""
                 async with self.session.post(
                     f"{self.base_url}/chat/completions",
                     headers=headers,
@@ -148,8 +148,22 @@ class AIEngine:
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        return data["choices"][0]["message"]["content"]
+                        # Read streaming response
+                        async for line in response.content:
+                            line_text = line.decode('utf-8').strip()
+                            if line_text.startswith('data: '):
+                                data_str = line_text[6:]
+                                if data_str == '[DONE]':
+                                    break
+                                try:
+                                    chunk = json.loads(data_str)
+                                    delta = chunk.get('choices', [{}])[0].get('delta', {})
+                                    content = delta.get('content', '')
+                                    if content:
+                                        full_content += content
+                                except json.JSONDecodeError:
+                                    pass
+                        return full_content
                     else:
                         error_text = await response.text()
                         logger.error(f"AI API error {response.status}: {error_text}")
