@@ -233,12 +233,12 @@ class TradingMemory:
         
         if common_win_conditions:
             reflection["insights"].append(
-                f"Most successful patterns: {', '.join([f'{k} ({v[\"count\"]} wins)' for k, v in common_win_conditions[:3]])}"
+                f"Most successful patterns: {', '.join([f'{k} ({v['count']} wins)' for k, v in common_win_conditions[:3]])}"
             )
         
         if common_loss_conditions:
             reflection["insights"].append(
-                f"Most common failures: {', '.join([f'{k} ({v[\"count\"]} losses)' for k, v in common_loss_conditions[:3]])}"
+                f"Most common failures: {', '.join([f'{k} ({v['count']} losses)' for k, v in common_loss_conditions[:3]])}"
             )
             reflection["recommendations"].append({
                 "type": "avoid_patterns",
