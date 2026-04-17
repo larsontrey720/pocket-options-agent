@@ -127,15 +127,14 @@ class AIEngine:
             await self.session.close()
 
     async def chat(self, system_prompt: str, user_message: str, retries: int = 3) -> str:
-        """Send a chat completion request to NVIDIA proxy with retries"""
+        """Send a chat completion request to NVIDIA proxy with streaming"""
         headers = {"Content-Type": "application/json"}
         payload = {
             "model": self.model,
             "messages": [
                 {"role": "user", "content": user_message}
             ],
-            "stream": True,  # Enable streaming
-            "temperature": 0.3,
+            "stream": True,
         }
 
         for attempt in range(retries):
@@ -148,7 +147,7 @@ class AIEngine:
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as response:
                     if response.status == 200:
-                        # Read streaming response
+                        # Read as text lines for SSE
                         async for line in response.content:
                             line_text = line.decode('utf-8').strip()
                             if line_text.startswith('data: '):
@@ -157,12 +156,15 @@ class AIEngine:
                                     break
                                 try:
                                     chunk = json.loads(data_str)
-                                    delta = chunk.get('choices', [{}])[0].get('delta', {})
-                                    content = delta.get('content', '')
-                                    if content:
-                                        full_content += content
+                                    choices = chunk.get('choices', [])
+                                    if choices:
+                                        delta = choices[0].get('delta', {})
+                                        content = delta.get('content', '')
+                                        if content:
+                                            full_content += content
                                 except json.JSONDecodeError:
                                     pass
+                        logger.info(f"AI response received: {len(full_content)} chars")
                         return full_content
                     else:
                         error_text = await response.text()
@@ -172,15 +174,13 @@ class AIEngine:
                             continue
                         return ""
             except asyncio.TimeoutError:
-                logger.warning(f"AI request timed out (attempt {attempt + 1}/{retries})")
+                logger.warning(f"AI timeout (attempt {attempt + 1}/{retries})")
                 if attempt < retries - 1:
                     await asyncio.sleep(2)
-                    continue
             except Exception as e:
                 logger.error(f"AI request failed: {e}")
                 if attempt < retries - 1:
                     await asyncio.sleep(2)
-                    continue
         return ""
 
     async def analyze_market(self, context: MarketContext) -> TradeDecision:
