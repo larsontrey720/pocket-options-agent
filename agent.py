@@ -17,6 +17,14 @@ from typing import Optional
 
 import aiohttp
 
+# Import memory system for persistent learning
+try:
+    from memory import TradingMemory
+    HAS_MEMORY = True
+except ImportError:
+    HAS_MEMORY = False
+    TradingMemory = None
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -66,7 +74,7 @@ def normalize_ssid(ssid: str) -> str:
         
         # Reconstruct SSID
         normalized = f'42["auth",{json.dumps(data)}]'
-        logger.info(f"Normalized SSID: {normalized[:80]}...")
+        logger.info(f"Normalized SSID: {normalized[:80]}...')
         return normalized
         
     except json.JSONDecodeError:
@@ -327,6 +335,23 @@ class TradingAgent:
         self.ssid_expired = False
         self.refresh_attempts = 0
         self.max_refresh_attempts = 3
+        
+        # Persistent memory for learning
+        self.memory = None
+        if HAS_MEMORY:
+            memory_dir = os.path.join(os.path.dirname(cookies_file) if cookies_file else "/home/workspace/pocket-options-agent", "memory")
+            self.memory = TradingMemory(memory_dir)
+            logger.info(f"Memory system initialized at {memory_dir}")
+            
+            # Load learned strategy adjustments
+            if self.memory:
+                strategy = self.memory.get_strategy()
+                if strategy.get("confidence_threshold"):
+                    self.min_confidence = max(self.min_confidence, strategy["confidence_threshold"])
+                    logger.info(f"Using learned confidence threshold: {self.min_confidence:.0%}")
+                if strategy.get("preferred_assets") and not assets:
+                    self.assets = strategy["preferred_assets"]
+                    logger.info(f"Using learned preferred assets: {self.assets}")
 
     async def _refresh_ssid_via_cookies(self) -> Optional[str]:
         """Get fresh SSID using cookies via Playwright"""
@@ -740,6 +765,20 @@ class TradingAgent:
                 "profit": trade.profit,
                 "timestamp": trade.timestamp,
             })
+            
+            # Record to persistent memory for learning
+            if self.memory:
+                self.memory.record_trade({
+                    "order_id": trade.order_id,
+                    "asset": trade.asset,
+                    "direction": trade.direction,
+                    "amount": trade.amount,
+                    "duration": trade.duration,
+                    "status": trade.status,
+                    "profit": trade.profit,
+                    "timestamp": trade.timestamp,
+                    "confidence": trade.confidence if hasattr(trade, 'confidence') else 0.5,
+                })
 
             return trade
 
@@ -1025,7 +1064,7 @@ class TradingAgent:
             self._print_summary()
 
     def _print_summary(self):
-        """Print trading session summary"""
+        """Print trading session summary and run self-reflection"""
         logger.info("\n" + "="*60)
         logger.info("TRADING SESSION SUMMARY")
         logger.info("="*60)
@@ -1043,6 +1082,24 @@ class TradingAgent:
             logger.info(f"Total profit: ${total_profit:.2f}")
 
         logger.info("="*60)
+        
+        # Run self-reflection for learning
+        if self.memory and len(self.trade_history) >= 10:
+            logger.info("\nRunning self-reflection...")
+            reflection = self.memory.reflect()
+            
+            if "insights" in reflection:
+                logger.info("\n" + "-"*40)
+                logger.info("LEARNED INSIGHTS:")
+                for insight in reflection["insights"][:5]:
+                    logger.info(f"  - {insight}")
+            
+            if "recommendations" in reflection and reflection["recommendations"]:
+                logger.info("\nRECOMMENDATIONS FOR NEXT SESSION:")
+                for rec in reflection["recommendations"][:3]:
+                    logger.info(f"  - {rec.get('type', 'unknown')}: {rec.get('reason', '')}")
+            
+            logger.info("-"*40)
 
     def stop(self):
         """Stop the trading agent"""
