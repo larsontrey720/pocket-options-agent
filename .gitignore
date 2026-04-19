@@ -2,3 +2,5 @@ cookies.json
 .ssid_cache
 __pycache__/
 cookies*.json\nmemory/
+cookies*.json
+memory/
