@@ -210,7 +210,11 @@ Trend: {context.candles_summary.get('trend', 'unknown')}
 Momentum: {context.candles_summary.get('momentum', 'unknown')}
 Up moves: {context.candles_summary.get('up_moves', 0)}
 Down moves: {context.candles_summary.get('down_moves', 0)}
+
+=== LEARNED KNOWLEDGE ===
 {learning_context}
+=== END LEARNED KNOWLEDGE ===
+
 Rules: CALL if bullish, PUT if bearish, HOLD if unclear. Confidence 0.0-1.0. Learn from past trades.
 
 Respond ONLY with: {{"direction":"call","confidence":0.8,"reasoning":"brief reason","amount":5,"duration":60}}"""

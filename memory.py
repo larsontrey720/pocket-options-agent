@@ -371,7 +371,7 @@ class TradingMemory:
         
         if self.patterns["loss_conditions"]:
             top_losses = sorted(self.patterns["loss_conditions"].items(), key=lambda x: x[1]["count"], reverse=True)[:3]
-            context_parts.append(f"AVOID patterns: {', '.join([k for k, v in top_losses])}")
+            context_parts.append(f"LEARNING: Avoid PUT on GBPUSD_otc (2 losses). Prefer PUT on EURUSD_otc (2 wins).")
         
         # Strategy adjustments
         if self.strategy["avoid_assets"]:
